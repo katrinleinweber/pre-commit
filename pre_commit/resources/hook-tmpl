@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import distutils.spawn
 import os
+import signal
 import subprocess
 import sys
 
@@ -170,11 +171,39 @@ def _opts(stdin):
     return ('--config', CONFIG, '--hook-stage', stage) + fns[HOOK_TYPE](stdin)
 
 
+if sys.platform == 'win32':
+    # this seems to work without the signal handling on windows?
+    _subprocess_call = subprocess.call
+else:
+    def _subprocess_call(cmd):
+        """Make sure that we properly forward the KeyboardInterrupt from the
+        git hook script to the child process.  This is to ensure proper
+        cleanup in that process (for instance, restoring the temporarily
+        stashed patch).
+
+        See #1026 for more details
+        """
+        proc = None
+
+        def handler(*_):
+            if proc is None:
+                raise KeyboardInterrupt
+            else:
+                proc.send_signal(signal.SIGINT)
+
+        orig = signal.signal(signal.SIGINT, handler)
+        try:
+            proc = subprocess.Popen(cmd)
+            return proc.wait()
+        finally:
+            signal.signal(signal.SIGINT, orig)
+
+
 def main():
     retv, stdin = _run_legacy()
     try:
         _validate_config()
-        return retv | subprocess.call(_exe() + _opts(stdin))
+        return retv | _subprocess_call(_exe() + _opts(stdin))
     except EarlyExit:
         return retv
     except FatalError as e:
